@@ -1,20 +1,14 @@
+import { useTrades } from '@/hooks/useTrades';
 import { coachInsight, questionKind } from '@/utils/trades';
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
-import { useFocusEffect } from 'expo-router';
-import { getAllTrades, Trade } from '@/db/database';
 
 export default function AICoachScreen() {
-    const [trades, setTrades] = useState<Trade[]>([]);
+    const { trades } = useTrades();
     const [chatHistory, setChatHistory] = useState<{ sender: 'USER' | 'AI'; text: string }[]>([]);
     const [question, setQuestion] = useState('');
 
-    useFocusEffect(
-        useCallback(() => {
-            const all = getAllTrades();
-            setTrades(all);
-        }, [])
-    );
+
 
     const generateDataDrivenInsight = (kind: string) => coachInsight(trades, kind);
 

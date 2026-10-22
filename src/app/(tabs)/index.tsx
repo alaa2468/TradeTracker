@@ -1,50 +1,39 @@
+import { useTrades } from '@/hooks/useTrades';
 import { localDateKey } from '@/utils/trades';
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { useFocusEffect } from 'expo-router';
-import { getAllTrades, resetToDemoTrades, Trade } from '@/db/database';
+import { resetToDemoTrades } from '@/db/database';
+import { router } from 'expo-router';
+import { useNow } from '@/hooks/useNow';
+import { Button, DataSourceSwitch, PnlChart } from '@/components/TradingUI';
+import { duration, filterTrades, money, summarize, tradeSessionLabel, tradeTime, tradingSeconds, type Timeframe } from '@/utils/statistics';
 
 export default function HomeScreen() {
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [timeframe, setTimeframe] = useState<'ALL' | 'WEEK' | 'MONTH'>('ALL');
+  const { trades, sessions, mode, refresh, loading } = useTrades();
+  const now = useNow(mode === 'real' && sessions.some(session => session.status === 'active'));
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState('');
+  const [timeframe, setTimeframe] = useState<Timeframe>('ALL');
 
-  const loadData = useCallback(() => {
-    const all = getAllTrades();
-    setTrades(all);
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      loadData();
-    }, [loadData])
-  );
-
-  const filteredTrades = trades.filter((t) => {
-    if (timeframe === 'ALL') return true;
-    const days = timeframe === 'WEEK' ? 7 : 30;
-    const cutoff = localDateKey(new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - days + 1));
-    return t.tradeDate >= cutoff && t.tradeDate <= localDateKey();
-  });
-
-  const totalPnl = filteredTrades.reduce((sum, t) => sum + t.pnl, 0);
-  const wins = filteredTrades.filter((t) => t.pnl > 0);
-  const losses = filteredTrades.filter((t) => t.pnl < 0);
-  const winRate = filteredTrades.length > 0 ? Math.round((wins.length / filteredTrades.length) * 100) : 0;
-  const totalMinutes = filteredTrades.reduce((sum, t) => sum + t.durationMinutes, 0);
+  const filteredTrades = filterTrades(trades, timeframe, new Date(now));
+  const stats = summarize(filteredTrades);
+  const totalPnl = stats.pnl;
+  const winRate = stats.winRate;
+  const totalTime = tradingSeconds(sessions, timeframe, new Date(now));
 
   const todayTrades = trades.filter((trade) => trade.tradeDate === localDateKey()).length;
   const noted = filteredTrades.filter((trade) => (trade.notes ?? '').trim().length > 0).length;
   const notesRate = filteredTrades.length ? Math.round(noted / filteredTrades.length * 100) : 0;
 
-  const recentTen = [...filteredTrades].slice(0, 10).reverse();
-  const maxAbsPnl = Math.max(...recentTen.map((t) => Math.abs(t.pnl)), 100);
-
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+      <View style={{ marginBottom: 14 }}><DataSourceSwitch /></View>
       <View style={styles.filterRow}>
         {(['ALL', 'MONTH', 'WEEK'] as const).map((tf) => (
           <TouchableOpacity
             key={tf}
+            accessibilityRole="button"
+            accessibilityState={{ selected: timeframe === tf }}
             style={[styles.filterBtn, timeframe === tf && styles.filterBtnActive]}
             onPress={() => setTimeframe(tf)}
           >
@@ -61,46 +50,43 @@ export default function HomeScreen() {
           {totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`}
         </Text>
         <Text style={styles.subLabel}>
-          {filteredTrades.length} Trades | {(totalMinutes / 60).toFixed(1)} hrs Market Time
+          {stats.count} Trades | {mode === 'real' ? `${duration(totalTime)} trading time` : 'Demo examples'}
         </Text>
       </View>
 
       <View style={styles.grid}>
         <View style={styles.statCard}>
           <Text style={styles.statLabel}>Win Rate</Text>
-          <Text style={styles.statValue}>{winRate}%</Text>
+          <Text style={styles.statValue}>{winRate.toFixed(1)}%</Text>
         </View>
         <View style={styles.statCard}>
           <Text style={styles.statLabel}>Wins / Losses</Text>
           <Text style={styles.statValue}>
-            <Text style={styles.green}>{wins.length}W</Text> / <Text style={styles.red}>{losses.length}L</Text>
+            <Text style={styles.green}>{stats.wins}W</Text> / <Text style={styles.red}>{stats.losses}L</Text>
           </Text>
         </View>
       </View>
 
-      <View style={styles.sectionCard}>
-        <Text style={styles.sectionTitle}>Last 10 Trades PnL Distribution</Text>
-        <View style={styles.chartRow}>
-          {recentTen.map((t) => {
-            const barHeight = Math.max(12, Math.round((Math.abs(t.pnl) / maxAbsPnl) * 90));
-            return (
-              <View key={t.id} style={styles.barColumn}>
-                <View
-                  style={[
-                    styles.bar,
-                    { height: barHeight, backgroundColor: t.pnl >= 0 ? '#2ea043' : '#da3633' },
-                  ]}
-                />
-                <Text style={styles.barLabel}>{t.instrument.slice(0, 3)}</Text>
-              </View>
-            );
-          })}
+      <View style={styles.grid}>
+        <View style={styles.statCard}>
+          <Text style={styles.statLabel}>Average per trade</Text>
+          <Text style={[styles.statValue, { fontSize: 20 }, stats.average >= 0 ? styles.green : styles.red]}>{money(stats.average)}</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statLabel}>Breakeven trades</Text>
+          <Text style={styles.statValue}>{stats.breakeven}</Text>
         </View>
       </View>
+      {mode === 'real' && <View style={[styles.sectionCard, { gap: 10 }]}>
+        <Text style={styles.goalText}>{sessions.some(session => session.status === 'active') ? 'Your personal session is active.' : 'Start a personal session to record trades and track your time.'}</Text>
+        <Button title="Open Sessions" onPress={() => router.navigate('/sessions')} />
+        <Text style={styles.subLabel}>Trading time includes active sessions. Date filters count only time inside the selected days. Legacy trades have no recorded personal session time.</Text>
+      </View>}
+      <View style={{ marginBottom: 14 }}><PnlChart trades={filteredTrades} /></View>
 
       <View style={styles.sectionCard}>
         <Text style={styles.sectionTitle}>Personal Discipline Goals</Text>
-        <Text style={styles.goalText}>Daily Trade Limit: {todayTrades} / 3 ({todayTrades <= 3 ? 'Within limit' : 'Exceeded'})</Text>
+        <Text style={styles.goalText}>Daily Trade Limit (target): {todayTrades} / 3 ({todayTrades <= 3 ? 'Within limit' : 'Exceeded'})</Text>
         <View style={styles.progressTrack}>
           <View style={[styles.progressFill, { width: `${Math.min(todayTrades / 3 * 100, 100)}%` }]} />
         </View>
@@ -111,14 +97,15 @@ export default function HomeScreen() {
       </View>
 
       <Text style={styles.sectionHeader}>Recent Trades</Text>
+      {!filteredTrades.length && <Text style={styles.subLabel}>{loading ? 'Loading trades…' : 'No trades in this period yet.'}</Text>}
       {filteredTrades.slice(0, 5).map((t) => (
         <View key={t.id} style={styles.tradeRow}>
-          <View>
+          <View style={{ flex: 1 }}>
             <Text style={styles.tradeTitle}>
               {t.instrument} ({t.direction}) {t.isDemo ? '[DEMO]' : ''}
             </Text>
             <Text style={styles.tradeMeta}>
-              {t.tradeDate} | {t.session} | Mood: {t.emotion}
+              {tradeTime(t)} | {tradeSessionLabel(t)} | Mood: {t.emotion}
             </Text>
           </View>
           <Text style={[styles.tradePnl, t.pnl >= 0 ? styles.green : styles.red]}>
@@ -127,15 +114,27 @@ export default function HomeScreen() {
         </View>
       ))}
 
-      <TouchableOpacity
+      {mode === 'demo' && <TouchableOpacity
+        accessibilityRole="button"
         style={styles.resetButton}
-        onPress={() => {
-          resetToDemoTrades();
-          loadData();
+        disabled={resetting}
+        onPress={async () => {
+          if (resetting) return;
+          setResetting(true);
+          setResetError('');
+          try {
+            await resetToDemoTrades();
+            await refresh();
+          } catch {
+            setResetError('Unable to refresh demo trades. Please try again.');
+          } finally {
+            setResetting(false);
+          }
         }}
       >
-        <Text style={styles.resetButtonText}>Refresh 30 Demo Trades (keeps your entries)</Text>
-      </TouchableOpacity>
+        <Text style={styles.resetButtonText}>{resetting ? 'Refreshing…' : 'Refresh 30 Demo Trades (keeps your entries)'}</Text>
+      </TouchableOpacity>}
+      {resetError ? <Text accessibilityRole="alert" style={styles.red}>{resetError}</Text> : null}
     </ScrollView>
   );
 }
@@ -165,7 +164,7 @@ const styles = StyleSheet.create({
   progressTrack: { height: 8, backgroundColor: '#21262d', borderRadius: 4, marginBottom: 12, overflow: 'hidden' },
   progressFill: { height: '100%', backgroundColor: '#58a6ff', borderRadius: 4 },
   sectionHeader: { color: '#f0f6fc', fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
-  tradeRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#161b22', padding: 14, borderRadius: 8, marginBottom: 8, borderWidth: 1, borderColor: '#30363d' },
+  tradeRow: { gap: 10, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#161b22', padding: 14, borderRadius: 8, marginBottom: 8, borderWidth: 1, borderColor: '#30363d' },
   tradeTitle: { color: '#f0f6fc', fontWeight: '600', fontSize: 14 },
   tradeMeta: { color: '#8b949e', fontSize: 12, marginTop: 2 },
   tradePnl: { fontSize: 15, fontWeight: 'bold' },

@@ -20,7 +20,8 @@ config.server = {
       ? originalEnhanceMiddleware(middleware, server)
       : middleware;
     return (req, res, next) => {
-      res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+      // Safari does not support credentialless; require-corp also enables SharedArrayBuffer there.
+      res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
       res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
       return nextMiddleware(req, res, next);
     };

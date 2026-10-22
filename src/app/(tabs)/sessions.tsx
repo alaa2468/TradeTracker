@@ -1,129 +1,67 @@
-import { belongsToSession } from '@/utils/trades';
-import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { useFocusEffect } from 'expo-router';
-import { getAllTrades, Trade } from '@/db/database';
-
-const SESSIONS = [
-    { name: 'Sydney', utcOpen: 22, utcClose: 7 },
-    { name: 'Tokyo', utcOpen: 0, utcClose: 9 },
-    { name: 'London', utcOpen: 8, utcClose: 17 },
-    { name: 'New York', utcOpen: 13, utcClose: 22 },
-];
+import React, { useRef, useState } from 'react';
+import { FlatList, Text, View } from 'react-native';
+import { router } from 'expo-router';
+import { endSession, startSession } from '@/db/database';
+import { useTrades } from '@/hooks/useTrades';
+import { useNow } from '@/hooks/useNow';
+import { Button, Metrics, SessionCard, ui } from '@/components/TradingUI';
+import { duration, sessionSeconds } from '@/utils/statistics';
 
 export default function SessionsScreen() {
-    const [now, setNow] = useState(new Date());
-    const [trades, setTrades] = useState<Trade[]>([]);
+  const { sessions, trades, mode, setMode, refresh, loading } = useTrades();
+  const active = sessions.find(session => session.status === 'active');
+  const now = useNow(!!active);
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  const [error, setError] = useState('');
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const history = sessions.filter(session => session.status === 'completed');
 
-    useEffect(() => {
-        const timer = setInterval(() => setNow(new Date()), 1000);
-        return () => clearInterval(timer);
-    }, []);
+  const act = async (end: boolean) => {
+    if (lock.current) return;
+    lock.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      if (end && active) await endSession(active.id);
+      else if (!end) await startSession();
+      setConfirmEnd(false);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to save the session. Try again.');
+    } finally { lock.current = false; setBusy(false); }
+  };
 
-    useFocusEffect(
-        useCallback(() => {
-            setTrades(getAllTrades());
-        }, [])
-    );
-
-    const utcHour = now.getUTCHours();
-    const utcMin = now.getUTCMinutes();
-    const utcSec = now.getUTCSeconds();
-
-    const isSessionOpen = (open: number, close: number) => {
-        return open > close
-            ? utcHour >= open || utcHour < close
-            : utcHour >= open && utcHour < close;
-    };
-
-    const londonNewYorkOverlap = utcHour >= 13 && utcHour < 17;
-    const sydneyTokyoOverlap = utcHour >= 0 && utcHour < 7;
-
-    return (
-        <ScrollView style={styles.container}>
-            <View style={styles.clockCard}>
-                <Text style={styles.clockLabel}>Session Reference Clock (UTC)</Text>
-                <Text style={styles.clockTime}>
-                    {String(utcHour).padStart(2, '0')}:{String(utcMin).padStart(2, '0')}:{String(utcSec).padStart(2, '0')} UTC
-                </Text>
-                <Text style={styles.localTime}>Local Device Time: {now.toLocaleTimeString()}</Text>
-            </View>
-
-            <View style={styles.overlapBanner}>
-                <Text style={styles.overlapTitle}>Reference Overlap Window</Text>
-                <Text style={styles.overlapDesc}>
-                    {londonNewYorkOverlap
-                        ? 'London + New York reference overlap (13:00 - 17:00 UTC)'
-                        : sydneyTokyoOverlap
-                            ? 'Sydney + Tokyo reference overlap (00:00 - 07:00 UTC)'
-                            : 'Outside the listed reference overlap windows. London + New York reference overlap: 13:00 - 17:00 UTC.'}
-                </Text>
-            </View>
-
-            <Text style={styles.sectionHeader}>Forex Trading Sessions</Text>
-            <Text style={styles.scheduleText}>Fixed UTC reference schedule; daylight saving and weekend market closures are not reflected.</Text>
-            {SESSIONS.map((s) => {
-                const open = isSessionOpen(s.utcOpen, s.utcClose);
-                const targetHour = open ? s.utcClose : s.utcOpen;
-                const secondsLeft = (targetHour * 3600 - (utcHour * 3600 + utcMin * 60 + utcSec) + 86400) % 86400;
-                const minutesLeft = Math.ceil(secondsLeft / 60);
-                const hoursLeft = Math.floor(minutesLeft / 60);
-
-
-                const sessionTrades = trades.filter((t) => belongsToSession(t.session, s.name));
-                const sessionPnl = sessionTrades.reduce((sum, t) => sum + t.pnl, 0);
-                const sessionWins = sessionTrades.filter((t) => t.pnl > 0).length;
-                const winRate = sessionTrades.length > 0 ? Math.round((sessionWins / sessionTrades.length) * 100) : 0;
-
-                return (
-                    <View key={s.name} style={styles.card}>
-                        <View style={styles.rowBetween}>
-                            <Text style={styles.sessionName}>{s.name} Session</Text>
-                            <Text style={[styles.badge, open ? styles.badgeOpen : styles.badgeClosed]}>
-                                {open ? 'IN WINDOW' : 'OUTSIDE WINDOW'}
-                            </Text>
-                        </View>
-                        <Text style={styles.scheduleText}>
-                            Reference Hours: {String(s.utcOpen).padStart(2, '0')}:00 - {String(s.utcClose).padStart(2, '0')}:00 UTC
-                        </Text>
-                        <Text style={styles.countdownText}>
-                            {open ? `Closes in ~${hoursLeft}h ${minutesLeft % 60}m` : `Opens in ~${hoursLeft}h ${minutesLeft % 60}m`}
-                        </Text>
-
-                        <View style={styles.metricsBar}>
-                            <Text style={styles.metricItem}>Trades: {sessionTrades.length}</Text>
-                            <Text style={styles.metricItem}>Win Rate: {winRate}%</Text>
-                            <Text style={[styles.metricItem, sessionPnl >= 0 ? styles.green : styles.red]}>
-                                PnL: {sessionPnl >= 0 ? `+$${sessionPnl.toFixed(0)}` : `-$${Math.abs(sessionPnl).toFixed(0)}`}
-                            </Text>
-                        </View>
-                    </View>
-                );
-            })}
-        </ScrollView>
-    );
+  return <FlatList style={ui.page} contentContainerStyle={ui.content} data={mode === 'real' ? history : []}
+    keyExtractor={session => String(session.id)}
+    ListHeaderComponent={<View style={{ gap: 14 }}>
+      <Text style={ui.title}>Your personal trading sessions</Text>
+      <Text style={ui.muted}>Start when you trade. End when you finish. Sessions stay active until you end them, even if you close the app.</Text>
+      {mode === 'demo' ? <View style={ui.card}>
+        <Text style={ui.text}>Demo trades have no personal sessions. Your saved sessions are in My trades.</Text>
+        <Button title="Switch to My trades" onPress={() => setMode('real')} />
+      </View> : <View style={ui.card}>
+        {active ? <>
+          <Text style={[ui.title, ui.green]}>Session #{active.id} · ACTIVE</Text>
+          <Text style={ui.muted}>Started {new Date(active.start_time).toLocaleString()}</Text>
+          <Text style={ui.value}>{duration(sessionSeconds(active, now))}</Text>
+          <Metrics trades={trades.filter(trade => trade.session_id === active.id)} />
+          <Button title="Log a trade" secondary onPress={() => router.navigate('/journal')} />
+          {confirmEnd ? <>
+            <Text style={ui.text}>End Session #{active.id} now? Its trades and history will be saved.</Text>
+            <Button title={busy ? 'Ending…' : 'Confirm End Session'} danger disabled={busy} onPress={() => void act(true)} />
+            <Button title="Keep session active" secondary disabled={busy} onPress={() => setConfirmEnd(false)} />
+          </> : <Button title="End Session" danger disabled={busy} onPress={() => setConfirmEnd(true)} />}
+        </> : <>
+          <Text style={ui.title}>Ready to trade?</Text>
+          <Text style={ui.muted}>Start a session to group your trades and track your time.</Text>
+          <Button title={busy ? 'Starting…' : 'Start Session'} disabled={busy || loading} onPress={() => void act(false)} />
+        </>}
+      </View>}
+      {error ? <Text accessibilityRole="alert" style={ui.red}>{error}</Text> : null}
+      {mode === 'real' && <Text style={ui.title}>Session history</Text>}
+    </View>}
+    renderItem={({ item }) => <SessionCard session={item} trades={trades} now={now} />}
+    ListEmptyComponent={mode === 'real' ? <Text style={ui.muted}>{loading ? 'Loading sessions…' : 'Completed sessions will appear here. Tap a session to see all its trades.'}</Text> : undefined}
+  />;
 }
-
-const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#0d1117', padding: 16 },
-    clockCard: { backgroundColor: '#161b22', padding: 18, borderRadius: 12, marginBottom: 14, borderWidth: 1, borderColor: '#30363d' },
-    clockLabel: { color: '#8b949e', fontSize: 12, textTransform: 'uppercase' },
-    clockTime: { color: '#58a6ff', fontSize: 32, fontWeight: 'bold', marginVertical: 4 },
-    localTime: { color: '#c9d1d9', fontSize: 13 },
-    overlapBanner: { backgroundColor: '#1c2128', padding: 14, borderRadius: 10, marginBottom: 16, borderLeftWidth: 4, borderLeftColor: '#a371f7' },
-    overlapTitle: { color: '#d2a8ff', fontWeight: 'bold', fontSize: 14, marginBottom: 4 },
-    overlapDesc: { color: '#c9d1d9', fontSize: 13 },
-    sectionHeader: { color: '#f0f6fc', fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
-    card: { backgroundColor: '#161b22', padding: 16, borderRadius: 10, marginBottom: 12, borderWidth: 1, borderColor: '#30363d' },
-    rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-    sessionName: { color: '#f0f6fc', fontSize: 17, fontWeight: 'bold' },
-    badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 4, fontSize: 11, fontWeight: 'bold' },
-    badgeOpen: { backgroundColor: '#238636', color: '#ffffff' },
-    badgeClosed: { backgroundColor: '#30363d', color: '#8b949e' },
-    scheduleText: { color: '#8b949e', fontSize: 13, marginTop: 6 },
-    countdownText: { color: '#58a6ff', fontSize: 13, fontWeight: '600', marginTop: 4 },
-    metricsBar: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#21262d' },
-    metricItem: { color: '#c9d1d9', fontSize: 12, fontWeight: '600' },
-    green: { color: '#3fb950' },
-    red: { color: '#f85149' },
-});

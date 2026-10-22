@@ -14,7 +14,7 @@ export default function TabLayout() {
       <Tabs.Screen name="journal" options={{ title: 'Journal', tabBarIcon: ({ color, size }) => <FontAwesome name="book" color={typeof color === 'string' ? color : '#8b949e'} size={size} /> }} />
       <Tabs.Screen name="analytics" options={{ title: 'Analytics', tabBarIcon: ({ color, size }) => <FontAwesome name="bar-chart" color={typeof color === 'string' ? color : '#8b949e'} size={size} /> }} />
       <Tabs.Screen name="sessions" options={{ title: 'Sessions', tabBarIcon: ({ color, size }) => <FontAwesome name="clock-o" color={typeof color === 'string' ? color : '#8b949e'} size={size} /> }} />
-      <Tabs.Screen name="coach" options={{ title: 'Coach', tabBarIcon: ({ color, size }) => <FontAwesome name="comment-o" color={typeof color === 'string' ? color : '#8b949e'} size={size} /> }} />
+      <Tabs.Screen name="coach" options={{ href: null }} />
       <Tabs.Screen name="two" options={{ href: null }} />
     </Tabs>
   );

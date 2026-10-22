@@ -1,16 +1,16 @@
-import React, { useState, useCallback } from 'react';
+import { useTrades } from '@/hooks/useTrades';
+import { useNow } from '@/hooks/useNow';
+import { router } from 'expo-router';
+import { Button, DataSourceSwitch, Metrics, PnlChart, SessionCard, TradeSummary, ui } from '@/components/TradingUI';
+import { duration, tradingSeconds } from '@/utils/statistics';
+import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { useFocusEffect } from 'expo-router';
-import { getAllTrades, Trade } from '@/db/database';
 
 export default function AnalyticsScreen() {
-    const [trades, setTrades] = useState<Trade[]>([]);
+    const { trades, sessions, mode } = useTrades();
+    const now = useNow(mode === 'real' && sessions.some(session => session.status === 'active'));
 
-    useFocusEffect(
-        useCallback(() => {
-            setTrades(getAllTrades());
-        }, [])
-    );
+
 
     const wins = trades.filter((t) => t.pnl > 0);
     const losses = trades.filter((t) => t.pnl < 0);
@@ -23,10 +23,24 @@ export default function AnalyticsScreen() {
     const avgLoss = losses.length > 0 ? (grossLoss / losses.length).toFixed(2) : '0.00';
 
     const emotions = ['Calm', 'Confident', 'Excited', 'Nervous', 'Stressed', 'Frustrated'];
-    const instruments = ['XAU/USD', 'EUR/USD', 'GBP/USD', 'USD/JPY', 'BTC/USD'];
+    const instruments = [...new Set(trades.map(trade => trade.instrument))];
 
     return (
-        <ScrollView style={styles.container}>
+        <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+            <View style={{ marginBottom: 16 }}><DataSourceSwitch /></View>
+            <View style={ui.card}>
+                <Text style={ui.title}>Overall performance</Text>
+                <Metrics trades={trades} />
+                <Text style={ui.text}>Trading time: {mode === 'real' ? duration(tradingSeconds(sessions, 'ALL', new Date(now))) : 'Unavailable for demo examples'}</Text>
+                <Text style={ui.muted}>Win rate = wins ÷ all trades, including breakeven trades.</Text>
+            </View>
+            <View style={{ marginVertical: 16 }}><PnlChart trades={trades} /></View>
+            {mode === 'real' && <View style={{ gap: 12, marginBottom: 18 }}>
+                <Text style={styles.sectionHeader}>Performance per personal session</Text>
+                {sessions.slice(0, 10).map(session => <SessionCard key={session.id} session={session} trades={trades} now={now} />)}
+                {!sessions.length && <Text style={ui.muted}>Start a session to build your personal session history.</Text>}
+                <Button title="View all sessions" secondary onPress={() => router.navigate('/sessions')} />
+            </View>}
             <Text style={styles.sectionHeader}>Core Statistical Metrics</Text>
             <View style={styles.grid}>
                 <View style={styles.metricBox}>
@@ -39,7 +53,7 @@ export default function AnalyticsScreen() {
                     <Text style={styles.metricVal}>
                         <Text style={styles.green}>+${avgWin}</Text> / <Text style={styles.red}>-${avgLoss}</Text>
                     </Text>
-                    <Text style={styles.metricHint}>Risk-to-reward execution ratio</Text>
+                    <Text style={styles.metricHint}>Average recorded profit and loss</Text>
                 </View>
             </View>
 
@@ -98,6 +112,12 @@ export default function AnalyticsScreen() {
                     );
                 })}
             </View>
+            <Text style={styles.sectionHeader}>Recent trading history</Text>
+            <View style={{ gap: 12 }}>
+                {trades.slice(0, 10).map(trade => <View key={trade.id} style={ui.card}><TradeSummary trade={trade} /></View>)}
+                {!trades.length && <Text style={ui.muted}>No saved trades yet.</Text>}
+                <Button title="View full journal" secondary onPress={() => router.navigate('/journal')} />
+            </View>
         </ScrollView>
     );
 }
@@ -105,15 +125,15 @@ export default function AnalyticsScreen() {
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#0d1117', padding: 16 },
     sectionHeader: { color: '#f0f6fc', fontSize: 16, fontWeight: 'bold', marginBottom: 10, marginTop: 4 },
-    grid: { flexDirection: 'row', gap: 12, marginBottom: 16 },
-    metricBox: { flex: 1, backgroundColor: '#161b22', padding: 14, borderRadius: 10, borderWidth: 1, borderColor: '#30363d' },
+    grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 16 },
+    metricBox: { flex: 1, minWidth: 140, backgroundColor: '#161b22', padding: 14, borderRadius: 10, borderWidth: 1, borderColor: '#30363d' },
     metricLabel: { color: '#8b949e', fontSize: 12 },
     metricVal: { color: '#f0f6fc', fontSize: 18, fontWeight: 'bold', marginVertical: 6 },
     metricHint: { color: '#8b949e', fontSize: 11 },
     card: { backgroundColor: '#161b22', padding: 16, borderRadius: 10, marginBottom: 18, borderWidth: 1, borderColor: '#30363d' },
     cardSubtitle: { color: '#8b949e', fontSize: 12, marginBottom: 12 },
     barGroup: { marginBottom: 12 },
-    rowBetween: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+    rowBetween: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'space-between', marginBottom: 4 },
     rowTitle: { color: '#c9d1d9', fontSize: 13, fontWeight: '600' },
     track: { height: 8, backgroundColor: '#21262d', borderRadius: 4, overflow: 'hidden' },
     fill: { height: '100%', borderRadius: 4 },

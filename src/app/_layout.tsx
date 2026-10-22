@@ -1,11 +1,13 @@
 import { useFonts } from 'expo-font';
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
+import { ActivityIndicator, Text, View } from 'react-native';
 import { initDatabase } from '@/db/database';
 import 'react-native-reanimated';
 
-import { useColorScheme } from '@/components/useColorScheme';
+import { JournalProvider } from '@/hooks/JournalProvider';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -52,21 +54,28 @@ export default function RootLayout() {
   }, [loaded, databaseReady]);
 
   if (!loaded || !databaseReady) {
-    return null;
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0d1117', gap: 12 }}>
+        <ActivityIndicator color="#58a6ff" size="large" />
+        <Text accessibilityLiveRegion="polite" style={{ color: '#f0f6fc' }}>Loading TradeTrack…</Text>
+      </View>
+    );
   }
 
   return <RootLayoutNav />;
 }
 
 function RootLayoutNav() {
-  const colorScheme = useColorScheme();
-
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
+    <ThemeProvider value={DarkTheme}>
+      <JournalProvider>
+      <StatusBar style="light" />
+      <Stack screenOptions={{ headerStyle: { backgroundColor: '#161b22' }, headerTintColor: '#f0f6fc', contentStyle: { backgroundColor: '#0d1117' } }}>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+        <Stack.Screen name="session/[id]" options={{ title: 'Personal session' }} />
       </Stack>
+      </JournalProvider>
     </ThemeProvider>
   );
 }
