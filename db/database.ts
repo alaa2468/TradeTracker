@@ -1,9 +1,11 @@
 import { localDateKey } from '../utils/trades';
 import * as SQLite from 'expo-sqlite';
+import { DEFAULT_COACH_PREFERENCES, MOODS, validatePreferences, type CoachPreferences, type Mood } from '../utils/coach';
 
 interface DatabaseRuntime {
     db?: SQLite.SQLiteDatabase;
     initialization?: Promise<void>;
+    initializationVersion?: number;
     operations: Promise<unknown>;
 }
 
@@ -53,7 +55,13 @@ export type TradeInput = Omit<Trade, 'id' | 'session_id' | 'timestamp'> & {
 };
 
 export function initDatabase(): Promise<void> {
-    runtime.initialization ??= initialize().catch((error: unknown) => {
+    // A development reload can retain the v2 connection and resolved initializer.
+    // Migrate behind any in-flight work before exposing the new coaching tables.
+    if (runtime.initializationVersion !== 3) {
+        runtime.initializationVersion = 3;
+        runtime.initialization = undefined;
+    }
+    runtime.initialization ??= queued(initialize).catch((error: unknown) => {
         runtime.initialization = undefined;
         throw error;
     });
@@ -85,7 +93,7 @@ async function initialize(): Promise<void> {
   `);
 
         const version = await runtime.db!.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-        if (version && version.user_version > 2) {
+        if (version && version.user_version > 3) {
             throw new Error('This database was saved by a newer version of TradeTrack. Update the app to open it safely.');
         }
         if (version?.user_version === 0) {
@@ -115,7 +123,25 @@ async function initialize(): Promise<void> {
             await runtime.db!.execAsync('ALTER TABLE trades ADD COLUMN timestamp TEXT');
         }
         await runtime.db!.execAsync(`CREATE INDEX IF NOT EXISTS trades_session_id ON trades(session_id);
-            PRAGMA user_version = 2;`);
+            CREATE TABLE IF NOT EXISTS session_check_ins (
+                session_id INTEGER NOT NULL REFERENCES sessions(id),
+                phase TEXT NOT NULL CHECK (phase IN ('before', 'after')),
+                mood TEXT NOT NULL CHECK (mood IN ('Calm','Confident','Excited','Nervous','Stressed','Frustrated')),
+                stress INTEGER NOT NULL CHECK (stress BETWEEN 1 AND 5),
+                notes TEXT NOT NULL DEFAULT '',
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, phase)
+            );
+            CREATE TABLE IF NOT EXISTS coach_preferences (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS coach_session_state (
+                session_id INTEGER PRIMARY KEY REFERENCES sessions(id),
+                dismissed_key TEXT NOT NULL DEFAULT '',
+                break_until TEXT
+            );
+            PRAGMA user_version = 3;`);
     });
 }
 
@@ -272,13 +298,16 @@ export async function getSessions(): Promise<TradingSession[]> {
     return queued(() => runtime.db!.getAllAsync<TradingSession>('SELECT * FROM sessions ORDER BY start_time DESC, id DESC'));
 }
 
-export async function startSession(): Promise<void> {
+export async function startSession(checkIn?: CheckInInput): Promise<void> {
+    if (checkIn) validateCheckIn(checkIn);
     await initDatabase();
-    await queued(async () => {
+    await queued(() => runtime.db!.withTransactionAsync(async () => {
         const active = await runtime.db!.getFirstAsync<TradingSession>("SELECT * FROM sessions WHERE status = 'active'");
         if (active) throw new Error('A session is already active. End it before starting another.');
-        await runtime.db!.runAsync("INSERT INTO sessions (start_time, status) VALUES (?, 'active')", [new Date().toISOString()]);
-    });
+        const time = new Date().toISOString();
+        const result = await runtime.db!.runAsync("INSERT INTO sessions (start_time, status) VALUES (?, 'active')", [time]);
+        if (checkIn) await writeCheckIn(Number(result.lastInsertRowId), 'before', checkIn, time);
+    }));
 }
 
 export async function endSession(id: number): Promise<void> {
@@ -305,4 +334,72 @@ export async function resetToDemoTrades(): Promise<void> {
         await runtime.db!.runAsync('DELETE FROM trades WHERE isDemo = ?', [1]);
         await seedDemoTrades();
     }));
+}
+
+export interface CheckInInput { mood: Mood; stress: number; notes: string }
+export interface SessionCheckIn extends CheckInInput {
+    session_id: number;
+    phase: 'before' | 'after';
+    recorded_at: string;
+}
+export interface CoachSessionState {
+    session_id: number;
+    dismissed_key: string;
+    break_until: string | null;
+}
+function validateCheckIn(input: CheckInInput) {
+    if (!MOODS.includes(input.mood) || !Number.isInteger(input.stress) || input.stress < 1 || input.stress > 5) {
+        throw new Error('Choose a mood and a stress level from 1 to 5.');
+    }
+    if (typeof input.notes !== 'string' || input.notes.length > 1000) throw new Error('Notes must be at most 1000 characters.');
+}
+async function writeCheckIn(sessionId: number, phase: SessionCheckIn['phase'], input: CheckInInput, time: string) {
+    await runtime.db!.runAsync(`INSERT INTO session_check_ins (session_id, phase, mood, stress, notes, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?)`, [sessionId, phase, input.mood, input.stress, input.notes.trim(), time]);
+}
+export async function savePostSessionCheckIn(sessionId: number, input: CheckInInput): Promise<void> {
+    validateCheckIn(input);
+    await initDatabase();
+    await queued(async () => {
+        const session = await runtime.db!.getFirstAsync<TradingSession>("SELECT * FROM sessions WHERE id=? AND status='completed'", [sessionId]);
+        if (!session) throw new Error('End this session before adding an after-session check-in.');
+        if (Date.now() < Date.parse(session.end_time!)) throw new Error('Correct your device clock before saving this check-in.');
+        await writeCheckIn(sessionId, 'after', input, new Date().toISOString());
+    });
+}
+export async function getCheckIns(): Promise<SessionCheckIn[]> {
+    await initDatabase();
+    return queued(() => runtime.db!.getAllAsync<SessionCheckIn>('SELECT * FROM session_check_ins ORDER BY recorded_at DESC'));
+}
+export async function getCoachPreferences(): Promise<CoachPreferences> {
+    await initDatabase();
+    return queued(async () => {
+        const row = await runtime.db!.getFirstAsync<{ value: string }>('SELECT value FROM coach_preferences WHERE id=1');
+        if (!row) return { ...DEFAULT_COACH_PREFERENCES };
+        const preferences: CoachPreferences = JSON.parse(row.value);
+        validatePreferences(preferences);
+        return preferences;
+    });
+}
+export async function saveCoachPreferences(preferences: CoachPreferences): Promise<void> {
+    validatePreferences(preferences);
+    await initDatabase();
+    await queued(() => runtime.db!.runAsync('INSERT INTO coach_preferences (id, value) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', [JSON.stringify(preferences)]));
+}
+export async function getCoachSessionStates(): Promise<CoachSessionState[]> {
+    await initDatabase();
+    return queued(() => runtime.db!.getAllAsync<CoachSessionState>('SELECT * FROM coach_session_state'));
+}
+export async function saveCoachSessionState(sessionId: number, dismissedKey: string, breakUntil: string | null): Promise<void> {
+    if (breakUntil && (!Number.isFinite(Date.parse(breakUntil)) || Date.parse(breakUntil) > Date.now() + 6 * 60000)) {
+        throw new Error('Invalid break time.');
+    }
+    await initDatabase();
+    await queued(async () => {
+        const session = await runtime.db!.getFirstAsync<TradingSession>("SELECT * FROM sessions WHERE id=? AND status='active'", [sessionId]);
+        if (!session) throw new Error('This session is no longer active.');
+        await runtime.db!.runAsync(`INSERT INTO coach_session_state (session_id, dismissed_key, break_until) VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET dismissed_key=excluded.dismissed_key, break_until=excluded.break_until`,
+            [sessionId, dismissedKey, breakUntil]);
+    });
 }

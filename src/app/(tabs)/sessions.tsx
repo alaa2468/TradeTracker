@@ -1,7 +1,8 @@
+import { ActiveCoachingCard, CheckInForm } from '@/components/CoachUI';
 import React, { useRef, useState } from 'react';
 import { FlatList, Text, View } from 'react-native';
 import { router } from 'expo-router';
-import { endSession, startSession } from '@/db/database';
+import { endSession, startSession, savePostSessionCheckIn, type CheckInInput } from '@/db/database';
 import { useTrades } from '@/hooks/useTrades';
 import { useNow } from '@/hooks/useNow';
 import { Button, Metrics, SessionCard, ui } from '@/components/TradingUI';
@@ -15,20 +16,23 @@ export default function SessionsScreen() {
   const lock = useRef(false);
   const [error, setError] = useState('');
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [preCheckIn, setPreCheckIn] = useState(false);
+  const [postSession, setPostSession] = useState<number | null>(null);
   const history = sessions.filter(session => session.status === 'completed');
 
-  const act = async (end: boolean) => {
+  const act = async (end: boolean, checkIn?: CheckInInput) => {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
     setError('');
     try {
-      if (end && active) await endSession(active.id);
-      else if (!end) await startSession();
+      if (end && active) { await endSession(active.id); setPostSession(active.id); }
+      else if (!end) { await startSession(checkIn); setPreCheckIn(false); }
       setConfirmEnd(false);
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to save the session. Try again.');
+      if (checkIn) throw cause;
     } finally { lock.current = false; setBusy(false); }
   };
 
@@ -37,6 +41,10 @@ export default function SessionsScreen() {
     ListHeaderComponent={<View style={{ gap: 14 }}>
       <Text style={ui.title}>Your personal trading sessions</Text>
       <Text style={ui.muted}>Start when you trade. End when you finish. Sessions stay active until you end them, even if you close the app.</Text>
+      {mode === 'real' && <ActiveCoachingCard />}
+      {mode === 'real' && postSession !== null && <CheckInForm key={postSession} title={`After Session #${postSession}: how do you feel?`}
+        onSave={async input => { await savePostSessionCheckIn(postSession, input); setPostSession(null); await refresh(); }}
+        onSkip={() => setPostSession(null)} />}
       {mode === 'demo' ? <View style={ui.card}>
         <Text style={ui.text}>Demo trades have no personal sessions. Your saved sessions are in My trades.</Text>
         <Button title="Switch to My trades" onPress={() => setMode('real')} />
@@ -55,7 +63,9 @@ export default function SessionsScreen() {
         </> : <>
           <Text style={ui.title}>Ready to trade?</Text>
           <Text style={ui.muted}>Start a session to group your trades and track your time.</Text>
-          <Button title={busy ? 'Starting…' : 'Start Session'} disabled={busy || loading} onPress={() => void act(false)} />
+          {preCheckIn ? <CheckInForm title="Before your session: how do you feel?" saveLabel="Save and start session"
+            onSave={input => act(false, input)} onSkip={() => void act(false)} />
+            : <Button title={busy ? 'Starting…' : 'Start Session'} disabled={busy || loading} onPress={() => setPreCheckIn(true)} />}
         </>}
       </View>}
       {error ? <Text accessibilityRole="alert" style={ui.red}>{error}</Text> : null}

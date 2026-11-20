@@ -4,7 +4,7 @@ import { useFocusEffect } from 'expo-router';
 
 // A foreground display clock only: this never changes a saved session's status.
 // Elapsed time comes from its persisted start time, including after reopening.
-export function useNow(enabled = true) {
+export function useNow(enabled = true, intervalMs = 1000) {
   const [now, setNow] = useState(Date.now());
   useFocusEffect(useCallback(() => {
     setNow(Date.now());
@@ -14,12 +14,12 @@ export function useNow(enabled = true) {
       clearInterval(timer);
       if (active) {
         setNow(Date.now());
-        timer = setInterval(() => setNow(Date.now()), 1000);
+        timer = setInterval(() => setNow(Date.now()), intervalMs);
       }
     };
     update(AppState.currentState === 'active');
     const listener = AppState.addEventListener('change', state => update(state === 'active'));
     return () => { clearInterval(timer); listener.remove(); };
-  }, [enabled]));
+  }, [enabled, intervalMs]));
   return now;
 }

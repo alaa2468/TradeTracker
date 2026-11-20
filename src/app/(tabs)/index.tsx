@@ -28,6 +28,11 @@ export default function HomeScreen() {
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
       <View style={{ marginBottom: 14 }}><DataSourceSwitch /></View>
+      <View style={[styles.sectionCard, { gap: 8 }]}>
+        <Text style={styles.sectionTitle}>AI Trading Agent</Text>
+        <Text style={styles.goalText}>Explore Binance (USDT) and Kraken (USD) market snapshots and hourly price history.</Text>
+        <Button title="Open AI Trading Agent" secondary onPress={() => router.push('/agent')} />
+      </View>
       <View style={styles.filterRow}>
         {(['ALL', 'MONTH', 'WEEK'] as const).map((tf) => (
           <TouchableOpacity

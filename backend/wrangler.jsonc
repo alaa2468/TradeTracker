@@ -1,0 +1,18 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "tradetrack-market-data",
+  "main": "gold-worker.ts",
+  "compatibility_date": "2026-11-04",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      { "name": "GOLD_HISTORY", "class_name": "GoldHistory" },
+      { "name": "ANALYSIS", "class_name": "MarketAnalysis" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["GoldHistory"] },
+    { "tag": "v2", "new_sqlite_classes": ["MarketAnalysis"] }
+  ],
+  "observability": { "enabled": false }
+}

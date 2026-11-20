@@ -72,6 +72,7 @@ function RootLayoutNav() {
       <StatusBar style="light" />
       <Stack screenOptions={{ headerStyle: { backgroundColor: '#161b22' }, headerTintColor: '#f0f6fc', contentStyle: { backgroundColor: '#0d1117' } }}>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="agent" options={{ title: 'AI Trading Agent' }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
         <Stack.Screen name="session/[id]" options={{ title: 'Personal session' }} />
       </Stack>

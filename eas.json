@@ -3,9 +3,13 @@
     "preview": {
       "distribution": "internal",
       "developmentClient": false,
+      "environment": "preview",
+      "env": {
+        "EXPO_PUBLIC_MARKET_BACKEND_URL": "https://tradetrack-market-data.alaa-tradetrack.workers.dev"
+      },
       "android": {
         "buildType": "apk",
-        "image": "sdk-58"
+        "image": "auto"
       }
     }
   }

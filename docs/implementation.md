@@ -53,7 +53,7 @@ Analytics keeps profit factor, average wins/losses, mood comparisons, and instru
 
 My trades is the default every time the app opens. Demo examples is a separate, clearly marked view shared across Dashboard, Journal, and Analytics. Demo examples are read-only. Refreshing demo examples replaces only rows marked as demo; it does not remove real trades or sessions. Demo examples do not create personal sessions or contribute to real statistics.
 
-`src/app/(tabs)/_layout.tsx` hides Coach from the bottom bar. Its source file remains available in the project. No AI service or API was added.
+`src/app/(tabs)/_layout.tsx` keeps Dashboard, Journal, Analytics, and Sessions and now exposes the Coach tab described below. No AI service or API was added.
 
 `components/TradingUI.tsx` provides shared dark cards, buttons, charts, and summaries. `src/app/_layout.tsx` supplies the shared data provider, dark navigation theme, and session detail route. The earlier Safari startup and SQLite web fixes in `metro.config.js` and `src/app/+html.tsx` remain in place.
 
@@ -77,3 +77,21 @@ Browser interaction checks use a separate browser profile, so demonstration trad
 Verified for this update: all 21 regression tests, lint, and TypeScript checks passed. Browser checks covered session start/end, reopening an active session, journal add/edit/delete, statistics, filters, demo separation, and saved history. All four screens loaded in Safari and passed layout checks at 320px and 768px widths in Chrome. The final iOS, Android, and web export completed successfully. No physical-device test was performed.
 
 SQLite data is local to each app installation or browser origin. Your desktop browser, Expo app on a phone, and a different browser do not share the same journal. On web, use one TradeTrack tab per browser origin to avoid SQLite's exclusive browser-storage lock.
+
+## Trading Psychology Coach
+
+Coach is now the fifth tab and reuses the existing Coach route and journal-summary helpers. Its copy explicitly identifies offline rules rather than an AI model. It provides reflection and discipline support without investment or buy/sell recommendations. No packages or external services were added.
+
+SQLite schema version 3 adds `session_check_ins`, `coach_preferences`, and `coach_session_state`. Existing trade/session rows are not rewritten. Creating a session and its optional before-session check-in is atomic. Ending a session is saved before the after-session form opens; skipping or failing that form does not undo the session end. A missed after-session reflection can be added from Coach or any completed session's detail screen. Recorded-at dates distinguish later reflections. Missing before-session feelings are never backfilled.
+
+Check-ins record one of the journal's six moods, stress from 1 (relaxed) to 5 (very stressed), and optional notes of up to 1000 characters. Both phases are optional. Check-ins appear in session details.
+
+`utils/coach.ts` implements the behavior rules independently of the UI. Defaults are five trades within a sliding 30-minute window, three consecutive losses within one personal session, and 120 elapsed session minutes. Users can save different thresholds or restore defaults from Coach. A breakeven or winning trade resets a loss streak. Live coaching uses the trailing frequency window and current loss streak; weekly summaries consider patterns occurring in that reporting period. Stress of 4–5 or a reported stressed/frustrated mood prompts reflection. Losses alone are not treated as evidence of an emotion. Demo trades, unknown timestamps, future timestamps, and trades outside a personal session do not trigger intraday behavior signals.
+
+Sessions and Coach display evidence for possible patterns, a dismiss action, and an optional five-minute break. Break deadlines and dismissals persist across navigation and app restarts. Breaks do not end sessions or block journal entry. Dismissed duration reminders do not reappear merely because another minute passed. This version schedules no background notifications; expired timers are acknowledged when the screen is viewed.
+
+Weekly insights cover today and the preceding six device-local calendar dates. They compare trade counts with the preceding seven dates when both periods contain activity, summarize flagged sessions, show paired mood/stress changes, and suggest a discipline goal based on recorded patterns. Session time is clipped to the reporting period. These reports are recomputed from current data, so editing/deleting trades changes the observations. Legacy trades contribute to counts without invented intraday times. Small or missing samples are explicitly described.
+
+Automated coverage includes schema migration preservation/rollback, check-in/session atomicity, optional check-ins, duplicate post-session saves, preferences and break persistence, demo refresh isolation, rule thresholds, unsorted timestamps, sliding windows, breakeven resets, unknown/future data, emotion signals, paired check-ins, and local weekly boundaries. Run `npm test`, `npm run lint`, and `npm run typecheck`.
+
+Manual device testing is still needed for touch and keyboard behavior, screen-reader flow, small screens and enlarged fonts, app background/relaunch during a break, and upgrading a real installed app with existing journal data. Bundle exports validate compilation rather than these device interactions.

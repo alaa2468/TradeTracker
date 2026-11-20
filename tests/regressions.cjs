@@ -38,7 +38,8 @@ function databaseFixture() {
     getAllAsync: async (sql, params = []) => connection.prepare(sql).all(...params),
     runAsync: async (sql, params) => {
       if (failInsert && sql.trim().startsWith('INSERT')) throw new Error('Simulated disk failure');
-      return connection.prepare(sql).run(...params);
+      const result = connection.prepare(sql).run(...params);
+      return { ...result, lastInsertRowId: result.lastInsertRowid };
     },
     withTransactionAsync: async (action) => {
       connection.exec('BEGIN');
@@ -180,7 +181,7 @@ test('legacy databases retain their journal without an additional seed', async (
   const reopened = fixture.load();
   await reopened.initDatabase();
   assert.equal((await reopened.getAllTrades()).length, 30);
-  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 3);
   fixture.connection.close();
 });
 
@@ -328,9 +329,201 @@ test('a database from a newer app version is never silently downgraded', async (
   const db = fixture.load();
   await db.initDatabase();
   const before = fixture.connection.prepare('SELECT * FROM trades').all();
-  fixture.connection.exec('PRAGMA user_version=3');
+  fixture.connection.exec('PRAGMA user_version=4');
   await assert.rejects(() => fixture.load().initDatabase(), /newer version/);
-  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 4);
   assert.deepEqual(fixture.connection.prepare('SELECT * FROM trades').all(), before);
+  fixture.connection.close();
+});
+
+const coach = loadModule('utils/coach.ts');
+const coachNow = new Date(2026, 10, 4, 14, 0, 0).getTime();
+const coachSession = { id: 71, status: 'active', start_time: new Date(coachNow - 120 * 60000).toISOString(), end_time: null, duration: null };
+function coachTrade(id, minutesAgo, pnl = -10, extra = {}) {
+  const timestamp = new Date(coachNow - minutesAgo * 60000).toISOString();
+  return { id, timestamp, session_id: 71, isDemo: 0, pnl, emotion: 'Calm', tradeDate: utilities.localDateKey(new Date(timestamp)), ...extra };
+}
+
+test('coaching thresholds include exact boundaries and work with unsorted trades', () => {
+  const trades = [30, 20, 10, 5, 0].map((ago, i) => coachTrade(i + 1, ago));
+  const signals = coach.sessionSignals([...trades].reverse(), coachSession, [], undefined, coachNow, true);
+  assert.deepEqual(signals.map(s => s.kind), ['frequency', 'losses', 'duration']);
+  assert.match(signals.find(s => s.kind === 'losses').text, /5 consecutive/);
+  const below = coach.sessionSignals(trades.slice(0, 2), { ...coachSession, start_time: new Date(coachNow - 119.99 * 60000).toISOString() }, [], undefined, coachNow, true);
+  assert.deepEqual(below, []);
+});
+
+test('frequency uses a sliding window rather than a session-wide count', () => {
+  const trades = [100, 80, 60, 40, 20].map((ago, i) => coachTrade(i, ago, 1));
+  assert.equal(coach.sessionSignals(trades, coachSession, [], undefined, coachNow).some(s => s.kind === 'frequency'), false);
+  const burst = [90, 89, 88, 87, 86].map((ago, i) => coachTrade(i, ago, 1));
+  assert.equal(coach.sessionSignals(burst, coachSession, [], undefined, coachNow).some(s => s.kind === 'frequency'), true);
+  assert.equal(coach.sessionSignals(burst, coachSession, [], undefined, coachNow, true).some(s => s.kind === 'frequency'), false);
+});
+
+test('breakeven and wins reset loss streaks; active coaching uses the current streak', () => {
+  const rows = [coachTrade(1, 20), coachTrade(2, 15), coachTrade(3, 10), coachTrade(4, 5, 0)];
+  assert.equal(coach.sessionSignals(rows, coachSession, [], undefined, coachNow).some(s => s.kind === 'losses'), true);
+  assert.equal(coach.sessionSignals(rows, coachSession, [], undefined, coachNow, true).some(s => s.kind === 'losses'), false);
+  rows[2].pnl = 1;
+  assert.equal(coach.sessionSignals(rows, coachSession, [], undefined, coachNow).some(s => s.kind === 'losses'), false);
+});
+
+test('demo, unknown times, unrelated sessions and future trades cannot trigger behavior signals', () => {
+  const rows = Array.from({ length: 10 }, (_, i) => coachTrade(i, 0, -1, { isDemo: 1 }));
+  rows.push(...Array.from({ length: 10 }, (_, i) => coachTrade(i + 10, 0, -1, { timestamp: null })));
+  rows.push(...Array.from({ length: 10 }, (_, i) => coachTrade(i + 20, -10, -1)));
+  rows.push(...Array.from({ length: 10 }, (_, i) => coachTrade(i + 30, 0, -1, { session_id: 99 })));
+  assert.deepEqual(coach.sessionSignals(rows, { ...coachSession, start_time: new Date(coachNow - 60000).toISOString() }, [], undefined, coachNow), []);
+});
+
+test('reported stress and frustration prompt reflection without inferring emotion from losses', () => {
+  const checkIn = { session_id: 71, phase: 'before', mood: 'Calm', stress: 4, recorded_at: coachSession.start_time, notes: '' };
+  assert.ok(coach.sessionSignals([], coachSession, [checkIn], undefined, coachNow).some(s => s.kind === 'emotion'));
+  assert.ok(coach.sessionSignals([coachTrade(1, 0, 1, { emotion: 'Frustrated' })], coachSession, [], undefined, coachNow, true).some(s => s.kind === 'emotion'));
+  assert.equal(coach.sessionSignals([coachTrade(1, 60, 1, { emotion: 'Stressed' })], coachSession, [], undefined, coachNow, true).some(s => s.kind === 'emotion'), false);
+  assert.equal(coach.sessionSignals([coachTrade(1, 0)], coachSession, [], undefined, coachNow).some(s => s.kind === 'emotion'), false);
+});
+
+test('weekly insights use seven local dates, exclude demos/future days, and compare previous dates', () => {
+  const date = new Date(coachNow);
+  const key = offset => utilities.localDateKey(new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset));
+  const rows = [0, -6, -7, -13, -14, 1].map((offset, i) => coachTrade(i, 0, 1, { timestamp: null, session_id: null, tradeDate: key(offset) }));
+  rows.push(coachTrade(99, 0, 1, { isDemo: 1 }));
+  const result = coach.weeklyInsights(rows, [], [], undefined, date);
+  assert.equal(result.startKey, key(-6));
+  assert.match(result.lines[0], /2 personal trades/);
+  assert.match(result.lines[1], /\+0 trades.*\(2\)/);
+  assert.ok(result.lines.some(line => /2 trades lack/.test(line)));
+  assert.ok(result.lines.some(line => /Missing feelings are left unknown/.test(line)));
+});
+
+test('weekly stress pairs and personalized discipline goals follow the recorded evidence', () => {
+  const session = { ...coachSession, status: 'completed', end_time: new Date(coachNow).toISOString(), duration: 7200 };
+  const checkIns = [{ session_id: 71, phase: 'before', mood: 'Calm', stress: 1, recorded_at: session.start_time },
+    { session_id: 71, phase: 'after', mood: 'Stressed', stress: 4, recorded_at: session.end_time }];
+  const rows = [20, 15, 10, 5, 0].map((ago, i) => coachTrade(i, ago));
+  const result = coach.weeklyInsights(rows, [session], checkIns, undefined, new Date(coachNow));
+  assert.ok(result.lines.some(line => /\+3.0 points/.test(line)));
+  assert.ok(result.lines.some(line => /Calm → Stressed/.test(line)));
+  assert.match(result.goal, /Before each entry/);
+  // Removing the burst and long duration changes the suggested habit.
+  const empty = coach.weeklyInsights([], [], [], undefined, new Date(coachNow));
+  assert.match(empty.goal, /before and after check-in/);
+});
+
+test('version-two coaching migration preserves every trade and session and retries safely', async () => {
+  const fixture = databaseFixture();
+  const old = fixture.load();
+  await old.initDatabase();
+  await old.startSession();
+  const trades = fixture.connection.prepare('SELECT * FROM trades').all();
+  const sessions = fixture.connection.prepare('SELECT * FROM sessions').all();
+  fixture.connection.exec('DROP TABLE session_check_ins; DROP TABLE coach_preferences; DROP TABLE coach_session_state; PRAGMA user_version=2');
+  fixture.failSql('CREATE TABLE IF NOT EXISTS session_check_ins');
+  const next = fixture.load();
+  await assert.rejects(next.initDatabase(), /migration failure/);
+  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.deepEqual(fixture.connection.prepare('SELECT * FROM trades').all(), trades);
+  fixture.failSql('');
+  await next.initDatabase();
+  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.deepEqual(fixture.connection.prepare('SELECT * FROM trades').all(), trades);
+  assert.deepEqual(fixture.connection.prepare('SELECT * FROM sessions').all(), sessions);
+  assert.deepEqual(await next.getCheckIns(), []);
+  fixture.connection.close();
+});
+
+test('pre-session check-in and session start are atomic, validated, persistent, and optional', async () => {
+  const fixture = databaseFixture();
+  const db = fixture.load();
+  await db.initDatabase();
+  const input = { mood: 'Calm', stress: 2, notes: ' Follow my plan ' };
+  await assert.rejects(db.startSession({ ...input, stress: 0 }), /Choose a mood/);
+  fixture.failSql('');
+  // Fail only the check-in insert, after the session insert has succeeded.
+  fixture.connection.exec(`CREATE TRIGGER fail_check_in BEFORE INSERT ON session_check_ins BEGIN SELECT RAISE(ABORT, 'check-in disk failure'); END;`);
+  await assert.rejects(db.startSession(input), /check-in disk failure/);
+  assert.equal((await db.getSessions()).length, 0);
+  fixture.connection.exec('DROP TRIGGER fail_check_in');
+  await db.startSession(input);
+  const [saved] = await fixture.load().getCheckIns();
+  const [session] = await db.getSessions();
+  assert.equal(saved.session_id, session.id);
+  assert.equal(saved.phase, 'before');
+  assert.equal(saved.notes, 'Follow my plan');
+  assert.equal(saved.recorded_at, session.start_time);
+  await assert.rejects(db.startSession(input), /already active/);
+  await db.endSession(session.id);
+  await db.startSession();
+  assert.equal((await db.getCheckIns()).length, 1);
+  fixture.connection.close();
+});
+
+test('post-session check-in failures do not undo session end and duplicate saves are prevented', async () => {
+  const fixture = databaseFixture();
+  const db = fixture.load();
+  const input = { mood: 'Frustrated', stress: 5, notes: 'Time to reset' };
+  await db.startSession();
+  const [session] = await db.getSessions();
+  await assert.rejects(db.savePostSessionCheckIn(session.id, input), /End this session/);
+  await db.endSession(session.id);
+  fixture.fail();
+  await assert.rejects(db.savePostSessionCheckIn(session.id, input), /disk failure/);
+  assert.equal((await db.getSessions())[0].status, 'completed');
+  fixture.fail(false);
+  const results = await Promise.allSettled([db.savePostSessionCheckIn(session.id, input), db.savePostSessionCheckIn(session.id, input)]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal((await fixture.load().getCheckIns()).length, 1);
+  fixture.connection.close();
+});
+
+test('preferences and break/dismiss state persist and demo refresh cannot change them', async () => {
+  const fixture = databaseFixture();
+  const db = fixture.load();
+  assert.deepEqual(await db.getCoachPreferences(), coach.DEFAULT_COACH_PREFERENCES);
+  await assert.rejects(db.saveCoachPreferences({ ...coach.DEFAULT_COACH_PREFERENCES, frequentTrades: 1 }), /whole number/);
+  const preferences = { ...coach.DEFAULT_COACH_PREFERENCES, frequentTrades: 8 };
+  await db.saveCoachPreferences(preferences);
+  await db.startSession({ mood: 'Confident', stress: 1, notes: '' });
+  const [session] = await db.getSessions();
+  const until = new Date(Date.now() + 5 * 60000).toISOString();
+  await db.saveCoachSessionState(session.id, 'losses', until);
+  await db.resetToDemoTrades();
+  const reopened = fixture.load();
+  assert.deepEqual(await reopened.getCoachPreferences(), preferences);
+  assert.equal((await reopened.getCheckIns()).length, 1);
+  assert.equal((await reopened.getCoachSessionStates())[0].break_until, until);
+  await db.saveCoachSessionState(session.id, 'losses', null);
+  assert.equal((await db.getCoachSessionStates())[0].dismissed_key, 'losses');
+  await db.endSession(session.id);
+  await assert.rejects(db.saveCoachSessionState(session.id, '', null), /no longer active/);
+  fixture.connection.close();
+});
+
+test('weekly session time is clipped at the local week boundary and excludes previous-week loss streaks', () => {
+  const now = new Date(2026, 10, 4, 0, 30);
+  const boundary = new Date(2026, 9, 29, 0, 0);
+  const session = { id: 71, start_time: new Date(boundary.getTime() - 3 * 3600000).toISOString(),
+    end_time: new Date(boundary.getTime() + 60 * 60000).toISOString(), status: 'completed', duration: 4 * 3600 };
+  const rows = [1, 2, 3].map((id) => coachTrade(id, 0, -1, {
+    timestamp: new Date(boundary.getTime() - id * 60000).toISOString(), tradeDate: utilities.localDateKey(new Date(boundary.getTime() - id * 60000)),
+  }));
+  const result = coach.weeklyInsights(rows, [session], [], undefined, now);
+  assert.match(result.lines[2], /0 sessions met.*0 had a loss.*0 reached/);
+});
+
+test('development reload upgrades a retained version-two initializer before reading coaching tables', async () => {
+  const fixture = databaseFixture();
+  const environment = {};
+  const db = fixture.reload(environment);
+  await db.startSession();
+  const before = await db.getSessions();
+  fixture.connection.exec('DROP TABLE session_check_ins; DROP TABLE coach_preferences; DROP TABLE coach_session_state; PRAGMA user_version=2');
+  delete environment.__tradeTrackDatabaseV2.initializationVersion;
+  const updated = fixture.reload(environment);
+  assert.deepEqual(await updated.getCheckIns(), []);
+  assert.equal(fixture.connection.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.deepEqual(await updated.getSessions(), before);
   fixture.connection.close();
 });
